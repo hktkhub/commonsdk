@@ -80,6 +80,21 @@ func TestInjectWithoutMetadataIsNoop(t *testing.T) {
 	}
 }
 
+func TestFromHeaderReadsExactCaseKey(t *testing.T) {
+	h := http.Header{}
+	h[base.HeaderTraceID] = []string{"log-1"}
+	h[base.HeaderLane] = []string{"gray"}
+
+	md := propagate.FromHeader(h)
+
+	if md.TraceID != "log-1" {
+		t.Fatalf("TraceID = %q, want log-1", md.TraceID)
+	}
+	if md.Lane != "gray" {
+		t.Fatalf("Lane = %q, want gray", md.Lane)
+	}
+}
+
 func TestFromHeaderMapsLogIDAndEnvToCoreFields(t *testing.T) {
 	h := http.Header{}
 	h.Set(base.HeaderTraceID, "log-1")

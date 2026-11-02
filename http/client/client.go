@@ -15,6 +15,7 @@ package client
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -22,6 +23,7 @@ import (
 	"net/url"
 
 	"github.com/hktkhub/commonsdk/http/codec"
+	"github.com/hktkhub/commonsdk/http/response"
 	"github.com/hktkhub/commonsdk/http/transport"
 )
 
@@ -66,6 +68,7 @@ func New(opts ...Option) (*Client, error) {
 		transport.WithUserAgent(cfg.userAgent),
 		transport.WithWhitelist(cfg.propagation...),
 		transport.WithHeaderNames(cfg.headerNames),
+		transport.WithExactHeaderCase(cfg.exactHeaderCase),
 	)
 
 	return &Client{
@@ -172,7 +175,7 @@ func (c *Client) DoJSON(ctx context.Context, method, path string, in, out any) (
 
 	decodedEnvelope := false
 	if hasBody && c.envelope {
-		var env envelope
+		var env response.Envelope[json.RawMessage]
 		if err := c.codec.Unmarshal(trimmed, &env); err != nil {
 			if resp.StatusCode >= http.StatusBadRequest {
 				return result, &APIError{

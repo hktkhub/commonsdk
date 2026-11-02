@@ -9,23 +9,25 @@ import (
 )
 
 type config struct {
-	baseURL     string
-	timeout     time.Duration
-	transport   http.RoundTripper
-	codec       codec.Codec
-	userAgent   string
-	propagation []string
-	headerNames base.HeaderNames
-	successCode int
-	envelope    bool
+	baseURL         string
+	timeout         time.Duration
+	transport       http.RoundTripper
+	codec           codec.Codec
+	userAgent       string
+	propagation     []string
+	headerNames     base.HeaderNames
+	exactHeaderCase bool
+	successCode     int
+	envelope        bool
 }
 
 func defaultConfig() *config {
 	return &config{
-		timeout:     30 * time.Second,
-		codec:       codec.Default,
-		successCode: 0,
-		envelope:    true,
+		timeout:         30 * time.Second,
+		codec:           codec.Default,
+		exactHeaderCase: true,
+		successCode:     0,
+		envelope:        true,
 	}
 }
 
@@ -66,6 +68,12 @@ func WithPropagationHeaders(names ...string) Option {
 // 未设置的字段回退到 base.DefaultHeaderNames()。
 func WithHeaderNames(names base.HeaderNames) Option {
 	return func(c *config) { c.headerNames = names }
+}
+
+// WithExactHeaderCase 控制是否按 HeaderNames 中的原始大小写写入 header。
+// 默认开启；关闭后使用 net/http 的 canonical 形式。
+func WithExactHeaderCase(enabled bool) Option {
+	return func(c *config) { c.exactHeaderCase = enabled }
 }
 
 // WithSuccessCode 设置统一响应体中表示成功的业务码，默认 0。

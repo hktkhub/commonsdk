@@ -11,13 +11,6 @@ import (
 	"github.com/hktkhub/commonsdk/http/codec"
 )
 
-// envelope 是后端统一响应结构。
-type envelope struct {
-	Code int             `json:"code"`
-	Msg  string          `json:"msg"`
-	Data json.RawMessage `json:"data"`
-}
-
 // Result 是一次 HTTP 调用的完整结果。
 // HTTPStatus 始终是原始 HTTP 状态码，Code/Msg 来自业务响应体。
 type Result struct {

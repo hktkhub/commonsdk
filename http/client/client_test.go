@@ -1,13 +1,16 @@
 package client_test
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hktkhub/commonsdk/http/base"
 	"github.com/hktkhub/commonsdk/http/client"
@@ -106,6 +109,68 @@ func TestDoJSONWithCustomHeaderNames(t *testing.T) {
 	}
 	if gotLane != "blue" {
 		t.Fatalf("X-Env = %q, want blue", gotLane)
+	}
+}
+
+func TestDoJSONEmitsExactHeaderCase(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	rawReq := make(chan string, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		br := bufio.NewReader(conn)
+		var b strings.Builder
+		for {
+			line, err := br.ReadString('\n')
+			b.WriteString(line)
+			if err != nil || line == "\r\n" {
+				break
+			}
+		}
+		rawReq <- b.String()
+		_, _ = conn.Write([]byte("HTTP/1.1 204 No Content\r\n\r\n"))
+	}()
+
+	c, err := client.New(
+		client.WithBaseURL("http://"+ln.Addr().String()),
+		client.WithTransport(&http.Transport{Proxy: nil}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	ctx = base.WithMetadata(ctx, base.Metadata{
+		TraceID: "log-1",
+		Lane:    "gray",
+	})
+	if _, err := c.DoJSON(ctx, http.MethodGet, "/", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case raw := <-rawReq:
+		if !strings.Contains(raw, "X-Log-ID: log-1\r\n") {
+			t.Fatalf("request did not contain exact X-Log-ID:\n%s", raw)
+		}
+		if !strings.Contains(raw, "X-TH-Env: gray\r\n") {
+			t.Fatalf("request did not contain exact X-TH-Env:\n%s", raw)
+		}
+		if strings.Contains(raw, "X-Log-Id:") {
+			t.Fatalf("request contained canonical X-Log-Id:\n%s", raw)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for raw request")
 	}
 }
 

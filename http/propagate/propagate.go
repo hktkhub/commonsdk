@@ -27,7 +27,7 @@ func FromHeaderWith(h http.Header, names base.HeaderNames, allow ...string) base
 
 	var md base.Metadata
 	for _, name := range allow {
-		value := strings.TrimSpace(h.Get(name))
+		value := strings.TrimSpace(base.HeaderValue(h, name))
 		if value == "" {
 			continue
 		}

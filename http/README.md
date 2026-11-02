@@ -2,6 +2,8 @@
 
 团队所有出站 HTTP 请求的统一入口。业务只把链路元数据放进 `context`，由 `transport` 在 `RoundTrip` 阶段统一提取并注入 header，从而保证 trace、泳道等上下文在所有出站请求中自动透传。
 
+同时提供可选的 gin 响应规范中间件，不注册时完全不影响现有服务。
+
 ## 目录结构
 
 ```text
@@ -10,7 +12,9 @@ http/
 ├── propagate/   转换层：Metadata ↔ http.Header，白名单过滤
 ├── transport/   拦截层：包装官方 RoundTripper，统一注入
 ├── codec/       编解码层：请求/响应 body 的序列化与反序列化
-└── client/      门面层：团队唯一使用的 Client
+├── client/      门面层：团队唯一使用的 Client
+├── response/    共享响应契约：Envelope[T]
+└── ginmw/       可选 gin 中间件：JSON API 响应规范
 ```
 
 | 目录 | 文件 | 职责 |
@@ -22,6 +26,8 @@ http/
 | `codec` | `codec.go` | `Codec` 接口与默认 JSON 实现 |
 | `client` | `client.go` | `New` / `Do` / `Get` / `Post` / `DoJSON`、URL 解析、错误归一 |
 | `client` | `option.go` | Client 配置项：BaseURL、超时、Transport、Codec、User-Agent、header 白名单与名称映射 |
+| `response` | `response.go` | 服务端与客户端共用的 `Envelope[T]` 响应契约 |
+| `ginmw` | `ginmw.go` | 可选 gin 中间件，把 JSON API 响应包装成 `{code,msg,data}` |
 
 ## 分层依赖
 
@@ -29,6 +35,9 @@ http/
 client ──▶ transport ──▶ propagate ──▶ base
    │
    └────▶ codec
+
+ginmw ──▶ response
+   └────▶ gin（仅该可选包依赖）
 ```
 
 - 依赖严格单向，无循环。
@@ -90,6 +99,30 @@ client.DoJSON(ctx, ...)
 - `TraceID` 对应现网叫法 `X-Log-ID`，`Lane` 对应现网叫法 `X-TH-Env`，内部保持语义化命名。
 - `traceparent` 只有 `TraceID` 为 32 位十六进制且存在合法 `SpanID` 时才会自动生成；否则不影响 `X-Log-ID` / `X-TH-Env` 透传。
 - `Extra` 的 key 是 header 名，写入时大小写不敏感。
+
+### Header 大小写
+
+吐出时默认按 `HeaderNames` 中配置的原始拼写写入，`X-Log-ID` / `X-TH-Env` 会原样发到 HTTP/1.1 线上，不会被 Go canonical 化成 `X-Log-Id` / `X-Th-Env`。
+
+读取统一使用 `base.HeaderValue(h, name)`，大小写不敏感：
+
+- 优先匹配原始拼写 `X-Log-ID`
+- 其次匹配 canonical 形式 `X-Log-Id`
+- 最后遍历所有大小写变体
+
+所以上游发 `X-Log-ID`、`X-Log-Id`，或 HTTP/2 把 header 名压成 `x-log-id`，都能正确读取。
+
+关闭精确大小写：
+
+```go
+client.WithExactHeaderCase(false)
+```
+
+注意：
+
+- 精确大小写只对 HTTP/1.1 出站有效；HTTP/2 协议要求 header 名小写，会变成 `x-log-id`。
+- 读取不要求精确大小写，`HeaderValue` 已处理。
+- 如果底层 Transport 也是会读取 header 的注入器（例如 `lokisdk.OutboundTransport`），请只保留一个注入器，否则可能出现大小写重复 header。
 
 ## 使用方式
 
@@ -207,6 +240,71 @@ c, err := client.New(
     ),
 )
 ```
+
+## 服务端响应规范（可选）
+
+`http/ginmw` 提供可选的 gin 中间件，把 JSON API 响应统一成：
+
+```json
+{
+  "code": 0,
+  "msg": "ok",
+  "data": {}
+}
+```
+
+**不注册中间件时，gin 的默认输出完全不变。**
+
+### 注册方式
+
+```go
+import (
+    "github.com/gin-gonic/gin"
+    "github.com/hktkhub/commonsdk/http/ginmw"
+)
+
+r := gin.New()
+r.Use(gin.Recovery(), ginmw.Envelope())
+```
+
+### 处理规则
+
+| Handler 输出 | 中间件输出 |
+|---|---|
+| `c.JSON(200, data)` | `{"code":0,"msg":"ok","data":data}` |
+| `c.JSON(400, gin.H{"error":"bad"})` | HTTP 400 + `{"code":400,"msg":"bad","data":null}` |
+| `c.JSON(200, response.OK(data))` | 已是统一结构，原样透传 |
+| 空响应 | `{"code":0,"msg":"ok","data":null}` |
+| `c.String` / HTML / 文件 / Stream / SSE | 跳过，不改变原响应 |
+| 204 / 304 / 3xx / HEAD | 跳过 |
+| 响应体超过 `MaxBuffer` | 跳过，原样透传 |
+| 已调用 `Flush` / `Hijack` | 跳过，原样透传 |
+
+错误响应的 `msg` 会依次从 body 的 `msg`、`message`、`error` 字段提取，没有时使用 HTTP 状态文本；`data` 固定为 `null`。
+
+### 配置
+
+```go
+r.Use(ginmw.Envelope(
+    ginmw.WithSuccess(0, "ok"),
+    ginmw.WithErrorCode(func(status int) int {
+        return status // 默认 HTTP 状态码作为业务码
+    }),
+    ginmw.WithMaxBuffer(1<<20),
+    ginmw.WithSkip(func(c *gin.Context) bool {
+        return c.FullPath() == "/metrics"
+    }),
+))
+```
+
+### 注意事项
+
+- 只处理 JSON API，流式、SSE、文件下载、非 JSON 响应明确跳过。
+- 中间件会缓冲 JSON 响应体，默认上限 1 MiB，超过上限自动透传。
+- 与 gzip 中间件一起使用时，`Envelope` 要注册在 gzip 之后（内层），否则会尝试解析压缩后的字节。
+- `gin.Recovery()` 建议在 `Envelope` 外层；发生 panic 时中间件不会写入半成品 envelope。
+- 已经按 `{code,msg,data}` 返回的 handler 会被识别并透传，不会二次包裹。
+- `Envelope` 与 client 解析使用同一套 `{code,msg,data}` 契约。
 
 ## 接入现有服务
 
@@ -409,10 +507,11 @@ linters-settings:
 - 相对 URL、整体超时、JSON 编解码
 - 统一响应 `{code,msg,data}` 解析与 `Result` / `APIError`
 - 非 2xx 与业务错误归一
+- 可选 gin 响应规范中间件 `http/ginmw`
 
 未实现：
 
-- 入站中间件
+- trace / 泳道入站中间件（当前只提供提取函数和接入示例）
 - 自动生成 TraceID / SpanID
 - 重试、熔断、指标、日志
 - 流式 / SSE 专用 API
