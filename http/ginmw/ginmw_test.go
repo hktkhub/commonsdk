@@ -95,6 +95,33 @@ func TestEnvelopeKeepsExistingEnvelope(t *testing.T) {
 	}
 }
 
+type codedError struct {
+	code int64
+	msg  string
+}
+
+func (e codedError) Error() string { return e.msg }
+
+func (e codedError) Code() int64 { return e.code }
+
+func TestEnvelopeReadsCodedError(t *testing.T) {
+	r := newRouter()
+	r.GET("/coded", func(c *gin.Context) {
+		c.JSON(http.StatusInternalServerError, response.FromError(
+			codedError{code: 30043, msg: "quota exceeded"},
+		))
+	})
+
+	w := serve(t, r, http.MethodGet, "/coded")
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", w.Code)
+	}
+	env := decodeEnvelope(t, w.Body.Bytes())
+	if env.Code != 30043 || env.Msg != "quota exceeded" {
+		t.Fatalf("envelope = code %d msg %q", env.Code, env.Msg)
+	}
+}
+
 func TestEnvelopeSkipsNonJSON(t *testing.T) {
 	r := newRouter()
 	r.GET("/text", func(c *gin.Context) {

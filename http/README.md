@@ -257,15 +257,26 @@ c, err := client.New(
 
 ### 注册方式
 
-```go
-import (
-    "github.com/gin-gonic/gin"
-    "github.com/hktkhub/commonsdk/http/ginmw"
-)
+推荐在服务自己的 `middleware` 包做一层薄封装，`main` 里只保留两个中间件：
 
-r := gin.New()
-r.Use(gin.Recovery(), ginmw.Envelope())
+```go
+engine := gin.New()
+engine.Use(
+    middleware.RequestContext(),
+    middleware.Response(),
+)
 ```
+
+```go
+func Response(opts ...ginmw.Option) gin.HandlerFunc {
+    return ginmw.Envelope(opts...)
+}
+```
+
+- `RequestContext()` 负责把 trace / 泳道元数据写入请求 `context`。
+- `Response()` 只是 `ginmw.Envelope()` 的薄封装，便于业务统一入口。
+- 顺序上 `RequestContext` 在前，保证 `Response` 和后续 handler 都能读到链路元数据。
+- 不注册 `Response()` 时，gin 的默认输出完全不变。
 
 ### 处理规则
 
@@ -282,19 +293,44 @@ r.Use(gin.Recovery(), ginmw.Envelope())
 
 错误响应的 `msg` 会依次从 body 的 `msg`、`message`、`error` 字段提取，没有时使用 HTTP 状态文本；`data` 固定为 `null`。
 
+### 从 error 包写入
+
+error 包的错误可以直接转成统一响应：
+
+```go
+c.JSON(http.StatusInternalServerError, response.FromError(err))
+```
+
+`FromError` 会读取错误的 `Code()`（兼容 `error/base.Code` 这类命名整数类型）和 `Error()` 作为 msg，输出 `{code,msg,data:null}`；`ginmw.Envelope()` 识别后原样透传，不会二次包裹。
+
+普通 `error` 没有 `Code()` 时，用兜底码：
+
+```go
+c.JSON(http.StatusInternalServerError, response.FromErrorWithCode(500, err))
+```
+
+显式写法同样保留：
+
+```go
+c.JSON(http.StatusInternalServerError, response.Error(500, "internal server error"))
+```
+
 ### 配置
 
 ```go
-r.Use(ginmw.Envelope(
-    ginmw.WithSuccess(0, "ok"),
-    ginmw.WithErrorCode(func(status int) int {
-        return status // 默认 HTTP 状态码作为业务码
-    }),
-    ginmw.WithMaxBuffer(1<<20),
-    ginmw.WithSkip(func(c *gin.Context) bool {
-        return c.FullPath() == "/metrics"
-    }),
-))
+engine.Use(
+    middleware.RequestContext(),
+    middleware.Response(
+        ginmw.WithSuccess(0, "ok"),
+        ginmw.WithErrorCode(func(status int) int {
+            return status // 默认 HTTP 状态码作为业务码
+        }),
+        ginmw.WithMaxBuffer(1<<20),
+        ginmw.WithSkip(func(c *gin.Context) bool {
+            return c.FullPath() == "/metrics"
+        }),
+    ),
+)
 ```
 
 ### 注意事项
@@ -353,7 +389,7 @@ func NewDependencies() (*Dependencies, error) {
 gin：
 
 ```go
-func TraceMiddleware() gin.HandlerFunc {
+func RequestContext() gin.HandlerFunc {
     return func(c *gin.Context) {
         md := propagate.FromHeader(c.Request.Header)
         ctx := base.WithMetadata(c.Request.Context(), md)
@@ -361,6 +397,16 @@ func TraceMiddleware() gin.HandlerFunc {
         c.Next()
     }
 }
+```
+
+如果同时开启响应规范，`main` 里只保留两个中间件：
+
+```go
+engine := gin.New()
+engine.Use(
+    middleware.RequestContext(),
+    middleware.Response(),
+)
 ```
 
 net/http：
