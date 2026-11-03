@@ -1,10 +1,11 @@
 // Package ginmw 提供可选的 gin 中间件。
 //
-// 只有显式注册 Envelope 时才会规范 JSON API 的响应格式：
+// 显式注册 Envelope 时才会规范 JSON API 的响应格式：
 //
 //	r.Use(ginmw.Envelope())
 //
 // 不注册时完全不改变 gin 的默认行为。流式、SSE、文件、非 JSON 响应会被跳过。
+// RateLimit 提供基于 ratelimit.Limiter 的限流中间件。
 package ginmw
 
 import (

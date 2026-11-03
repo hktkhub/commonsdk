@@ -6,10 +6,12 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/hktkhub/commonsdk/http/ginmw"
 	"github.com/hktkhub/commonsdk/http/response"
+	"github.com/hktkhub/commonsdk/ratelimit"
 )
 
 func newRouter(opts ...ginmw.Option) *gin.Engine {
@@ -119,6 +121,56 @@ func TestEnvelopeReadsCodedError(t *testing.T) {
 	env := decodeEnvelope(t, w.Body.Bytes())
 	if env.Code != 30043 || env.Msg != "quota exceeded" {
 		t.Fatalf("envelope = code %d msg %q", env.Code, env.Msg)
+	}
+}
+
+func TestRateLimit(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(ginmw.Envelope())
+	r.Use(ginmw.RateLimit(
+		ratelimit.NewSlidingWindow(1, time.Minute),
+		func(c *gin.Context) string {
+			return ratelimit.Join("user", c.GetHeader("X-User"))
+		},
+	))
+
+	called := 0
+	r.GET("/limited", func(c *gin.Context) {
+		called++
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
+
+	serveUser := func(user string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/limited", nil)
+		req.Header.Set("X-User", user)
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		return w
+	}
+
+	first := serveUser("alice")
+	if first.Code != http.StatusOK {
+		t.Fatalf("first status = %d, want 200", first.Code)
+	}
+	second := serveUser("alice")
+	if second.Code != http.StatusTooManyRequests {
+		t.Fatalf("second status = %d, want 429", second.Code)
+	}
+	env := decodeEnvelope(t, second.Body.Bytes())
+	if env.Code != http.StatusTooManyRequests || env.Msg != "too many requests" {
+		t.Fatalf("envelope = code %d msg %q", env.Code, env.Msg)
+	}
+	if env.Data != nil {
+		t.Fatalf("data = %v, want nil", env.Data)
+	}
+
+	other := serveUser("bob")
+	if other.Code != http.StatusOK {
+		t.Fatalf("other user status = %d, want 200", other.Code)
+	}
+	if called != 2 {
+		t.Fatalf("handler called %d times, want 2", called)
 	}
 }
 
